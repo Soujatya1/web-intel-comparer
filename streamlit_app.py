@@ -1,151 +1,123 @@
 import streamlit as st
-import pandas as pd
-import math
-from pathlib import Path
+from langchain.document_loaders.sitemap import SitemapLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains import RetrievalQA
+from langchain_groq import ChatGroq
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.document_loaders import WebBaseLoader
+import requests
+from bs4 import BeautifulSoup
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Streamlit UI
+st.title("Website Intelligence")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Initialize session state variables
+if "loaded_docs" not in st.session_state:
+    st.session_state.loaded_docs = []
+if "retrieval_chain" not in st.session_state:
+    st.session_state.retrieval_chain = None
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+sitemap_urls_input = st.text_area("Enter sitemap URLs (one per line):")
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+all_urls = []
+loaded_docs = []
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+if st.button("Load and Process"):
+    sitemap_urls = sitemap_urls_input.splitlines()
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+    for sitemap_url in sitemap_urls:
+        try:
+            response = requests.get(sitemap_url)
+            sitemap_content = response.content
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+            # Parse sitemap URL
+            soup = BeautifulSoup(sitemap_content, 'xml')
+            urls = [loc.text for loc in soup.find_all('loc')]
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+            # Append all URLs to the main list (no filtering)
+            all_urls.extend(urls)
 
-    return gdp_df
+            for url in all_urls:
+                try:
+                    #st.write(f"Loading URL: {url}")
+                    loader = WebBaseLoader(url)
+                    docs = loader.load()
 
-gdp_df = get_gdp_data()
+                    for doc in docs:
+                        doc.metadata["source"] = url
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+                    loaded_docs.extend(docs)
+                    #st.write("Successfully loaded document")
+                except Exception as e:
+                    st.write(f"Error loading {url}: {e}")
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+        except Exception as e:
+            st.write(f"Error processing sitemap {sitemap_url}: {e}")
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+    st.write(f"Loaded documents: {len(loaded_docs)}")
 
-# Add some spacing
-''
-''
+    # Store loaded documents in session state
+st.session_state.loaded_docs = loaded_docs
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+# LLM and Embedding initialization
+llm = ChatGroq(groq_api_key="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", model_name='llama-3.3-70b-versatile', temperature=0.2, top_p=0.2)
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+# Craft ChatPrompt Template
+prompt = ChatPromptTemplate.from_template(
+            """
+            You are a Life Insurance specialist who needs to answer queries based on the information provided in the websites only. Please follow all the websites, and answer as per the same.
 
-countries = gdp_df['Country Code'].unique()
+            Do not answer anything except from the website information which has been entered. Please do not skip any information from the tabular data in the website.
 
-if not len(countries):
-    st.warning("Select at least one country")
+            Do not skip any information from the context. Answer appropriately as per the query asked.
 
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
+            Now, being an excellent Life Insurance agent, you need to compare your policies against the other company's policies in the websites, if asked.
 
-''
-''
-''
+            Generate tabular data wherever required to classify the difference between different parameters of policies.
 
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
+            In the question when referred to as two companies, please understand that is for HDFC Life and Reliance Nippon.
 
-st.header('GDP over time', divider='gray')
+            <context>
+            {context}
+            </context>
 
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+            Question: {input}"""
         )
+
+# Text Splitting
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=100,
+    length_function=len,
+)
+
+document_chunks = text_splitter.split_documents(st.session_state.loaded_docs)
+#st.write(f"Number of chunks: {len(document_chunks)}")
+
+# Stuff Document Chain Creation
+document_chain = create_stuff_documents_chain(llm, prompt)
+
+# Save document chain to session state
+st.session_state.retrieval_chain = document_chain
+
+query = st.text_input("Enter your query:")
+if st.button("Get Answer"):
+    if query:
+        # Directly pass the documents to the chain without using a retriever
+        context = "\n".join([doc.page_content for doc in st.session_state.loaded_docs])
+        response = st.session_state.retrieval_chain.invoke({"input": query, "context": context})
+
+        # Check the structure of the response
+        st.write("Response:")
+        st.write(response)  # Print the entire response to inspect its format
+
+        # If the response is a dictionary with 'answer' key, use it
+        if isinstance(response, dict) and 'answer' in response:
+            st.write(response['answer'])
+        else:
+            st.write("Here's your response!")
+    else:
+        st.write("No documents loaded. Please load and process the sitemap first.")
