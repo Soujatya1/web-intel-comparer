@@ -1,5 +1,5 @@
 import streamlit as st
-from langchain.document_loaders.sitemap import SitemapLoader
+from langchain_community.document_loaders.sitemap import SitemapLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain_groq import ChatGroq
