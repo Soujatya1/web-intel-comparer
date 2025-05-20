@@ -1,6 +1,6 @@
 import streamlit as st
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chains import RetrievalQA
+from langchain_core.documents import Document
 from langchain_groq import ChatGroq
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -40,11 +40,19 @@ if st.button("Load and Process"):
                 loader = WebBaseLoader(url)
                 docs = loader.load()
                 
-                # Add metadata
+                # Ensure we have Document objects
+                processed_docs = []
                 for doc in docs:
-                    doc.metadata["source"] = url
+                    if not isinstance(doc, Document):
+                        # Convert string content to Document object
+                        if isinstance(doc, str):
+                            processed_docs.append(Document(page_content=doc, metadata={"source": url}))
+                    else:
+                        # It's already a Document object
+                        doc.metadata["source"] = url
+                        processed_docs.append(doc)
                 
-                loaded_docs.extend(docs)
+                loaded_docs.extend(processed_docs)
                 st.success(f"Successfully loaded: {url}")
                 
             except Exception as e:
@@ -65,8 +73,13 @@ if st.button("Load and Process"):
                 base_domain = domain_match.group(1)
                 
                 # Parse the document content for links
-                soup = BeautifulSoup(doc.page_content, 'html.parser')
-                links = soup.find_all('a', href=True)
+                # Make sure we're dealing with document objects that have page_content
+                if hasattr(doc, 'page_content'):
+                    soup = BeautifulSoup(doc.page_content, 'html.parser')
+                    links = soup.find_all('a', href=True)
+                else:
+                    # Skip this document if it doesn't have page_content
+                    continue
                 
                 # Collect internal links
                 for link in links:
@@ -96,10 +109,17 @@ if st.button("Load and Process"):
                                 loader = WebBaseLoader(link)
                                 additional_docs = loader.load()
                                 
+                                # Process documents to ensure they're Document objects
+                                processed_docs = []
                                 for doc in additional_docs:
-                                    doc.metadata["source"] = link
+                                    if not isinstance(doc, Document):
+                                        if isinstance(doc, str):
+                                            processed_docs.append(Document(page_content=doc, metadata={"source": link}))
+                                    else:
+                                        doc.metadata["source"] = link
+                                        processed_docs.append(doc)
                                 
-                                st.session_state.loaded_docs.extend(additional_docs)
+                                st.session_state.loaded_docs.extend(processed_docs)
                                 st.success(f"Successfully loaded: {link}")
                             except Exception as e:
                                 st.error(f"Error loading {link}: {str(e)}")
@@ -109,14 +129,22 @@ if st.button("Load and Process"):
 # LLM and Text Splitting setup
 if st.session_state.loaded_docs:
     # Text Splitting
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=100,
-        length_function=len,
-    )
+    if st.session_state.loaded_docs:
+        valid_docs = []
+        for doc in st.session_state.loaded_docs:
+            if hasattr(doc, 'page_content'):
+                valid_docs.append(doc)
+            elif isinstance(doc, str):
+                valid_docs.append(Document(page_content=doc, metadata={"source": "unknown"}))
+        
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=100,
+            length_function=len,
+        )
 
-    document_chunks = text_splitter.split_documents(st.session_state.loaded_docs)
-    st.write(f"Split into {len(document_chunks)} chunks for processing")
+        document_chunks = text_splitter.split_documents(valid_docs)
+        st.write(f"Split into {len(document_chunks)} chunks for processing")
 
     # LLM setup
     with st.expander("Configure LLM Settings"):
@@ -161,8 +189,19 @@ if st.button("Get Answer"):
     else:
         with st.spinner("Generating answer..."):
             try:
-                # Prepare context from loaded documents
-                context = "\n".join([doc.page_content for doc in st.session_state.loaded_docs])
+                # Generate response
+                context = ""
+                for doc in st.session_state.loaded_docs:
+                    if hasattr(doc, 'page_content'):
+                        context += doc.page_content + "\n\n"
+                    elif isinstance(doc, str):
+                        context += doc + "\n\n"
+                    else:
+                        # Try to convert to string if possible
+                        try:
+                            context += str(doc) + "\n\n"
+                        except:
+                            pass
                 
                 # Generate response
                 response = st.session_state.retrieval_chain.invoke({"input": query, "context": context})
@@ -176,9 +215,16 @@ if st.button("Get Answer"):
                 
                 # Show sources
                 with st.expander("View Sources"):
-                    sources = set([doc.metadata["source"] for doc in st.session_state.loaded_docs])
-                    for source in sources:
-                        st.markdown(f"- [{source}]({source})")
+                    sources = set()
+                    for doc in st.session_state.loaded_docs:
+                        if hasattr(doc, 'metadata') and 'source' in doc.metadata:
+                            sources.add(doc.metadata["source"])
+                    
+                    if sources:
+                        for source in sources:
+                            st.markdown(f"- [{source}]({source})")
+                    else:
+                        st.write("No source information available.")
             
             except Exception as e:
                 st.error(f"Error generating answer: {str(e)}")
